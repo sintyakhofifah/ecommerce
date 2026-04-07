@@ -1,194 +1,122 @@
-const express    = require('express');
-const cors       = require('cors');
-const midtrans   = require('midtrans-client');
+const express = require('express');
+const cors    = require('cors');
+const midtrans = require('midtrans-client');
 require('dotenv').config();
 
 const app = express();
-
-// ── CORS config — izinkan semua origin untuk Flutter ──────────────────────
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Accept', 'Authorization'],
-}));
-
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'] }));
 app.use(express.json());
 
-// ── Cek environment variables ─────────────────────────────────────────────
-console.log('🔑 Server Key ada:', !!process.env.MIDTRANS_SERVER_KEY);
-console.log('🔑 Client Key ada:', !!process.env.MIDTRANS_CLIENT_KEY);
-
-if (!process.env.MIDTRANS_SERVER_KEY || !process.env.MIDTRANS_CLIENT_KEY) {
-  console.error('❌ MIDTRANS_SERVER_KEY atau MIDTRANS_CLIENT_KEY tidak ada di .env!');
-}
-
-// ── Midtrans Snap client ───────────────────────────────────────────────────
 const snap = new midtrans.Snap({
-  isProduction: false, // sandbox mode — ganti true kalau sudah live
+  isProduction: false,
   serverKey   : process.env.MIDTRANS_SERVER_KEY,
   clientKey   : process.env.MIDTRANS_CLIENT_KEY,
 });
 
-// ── Health check ──────────────────────────────────────────────────────────
-app.get('/', (req, res) => {
-  res.json({
-    status    : 'Buket Backend Running ✅',
-    timestamp : new Date().toISOString(),
-    serverKey : process.env.MIDTRANS_SERVER_KEY ? 'ada ✅' : 'TIDAK ADA ❌',
-    clientKey : process.env.MIDTRANS_CLIENT_KEY ? 'ada ✅' : 'TIDAK ADA ❌',
-  });
+const coreApi = new midtrans.CoreApi({
+  isProduction: false,
+  serverKey   : process.env.MIDTRANS_SERVER_KEY,
+  clientKey   : process.env.MIDTRANS_CLIENT_KEY,
 });
 
-// ── Generate Midtrans token ────────────────────────────────────────────────
+app.get('/', (req, res) => res.json({ status: 'Buket Backend Running ✅' }));
+
+// ── Generate QRIS Dinamis ─────────────────────────────────────────────────
 app.post('/create-transaction', async (req, res) => {
-  console.log('📦 Create transaction request:', JSON.stringify(req.body, null, 2));
-
   try {
-    const {
-      orderId,
-      amount,
-      customerName,
-      customerEmail,
-      customerPhone,
-      items,
-    } = req.body;
+    const { orderId, amount, customerName, customerEmail, customerPhone, items } = req.body;
 
-    // Validasi input
-    if (!orderId || !amount || !customerName || !customerEmail) {
-      return res.status(400).json({
-        success: false,
-        message: 'orderId, amount, customerName, customerEmail wajib diisi',
-      });
+    if (!orderId || !amount) {
+      return res.status(400).json({ success: false, message: 'orderId dan amount wajib' });
     }
 
-    // Pastikan amount adalah integer
     const grossAmount = parseInt(amount);
-    if (isNaN(grossAmount) || grossAmount <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'amount harus berupa angka positif',
-      });
-    }
 
-    // Hitung total dari items untuk validasi
-    const itemDetails = (items || []).map((i) => ({
-      id      : i.productId   || 'ITEM',
-      price   : parseInt(i.price) || 0,
+    // ✅ FIX: Hitung total item dulu, lalu buat adjustment kalau tidak sama
+    const itemDetails = (items || []).map(i => ({
+      id      : String(i.productId   || 'ITEM').substring(0, 50),
+      price   : parseInt(i.price)    || 0,
       quantity: parseInt(i.quantity) || 1,
-      name    : (i.productName || 'Produk').substring(0, 50), // max 50 char
+      name    : String(i.productName || 'Produk').substring(0, 50),
     }));
 
-    // Kalau item details ada, pastikan totalnya cocok
-    // Kalau tidak cocok, tambahkan item adjustment
-    const itemTotal = itemDetails.reduce(
-      (sum, i) => sum + (i.price * i.quantity), 0
-    );
+    const itemTotal = itemDetails.reduce((s, i) => s + (i.price * i.quantity), 0);
 
-    if (itemTotal !== grossAmount && itemDetails.length > 0) {
+    // Adjustment untuk ongkir/diskon supaya total selalu match
+    if (itemTotal !== grossAmount) {
       const diff = grossAmount - itemTotal;
-      if (diff !== 0) {
-        itemDetails.push({
-          id      : 'SHIPPING-DISCOUNT',
-          price   : diff,
-          quantity: 1,
-          name    : diff > 0 ? 'Ongkir & Biaya Lain' : 'Diskon',
-        });
-      }
+      itemDetails.push({
+        id      : 'ADJ',
+        price   : diff,
+        quantity: 1,
+        name    : diff > 0 ? 'Ongkos Kirim' : 'Diskon',
+      });
     }
 
+    // Generate QRIS via Core API
     const parameter = {
+      payment_type      : 'qris',
       transaction_details: {
         order_id    : orderId,
         gross_amount: grossAmount,
       },
       customer_details: {
-        first_name: customerName || 'Customer',
-        email     : customerEmail,
+        first_name: customerName  || 'Customer',
+        email     : customerEmail || 'customer@email.com',
         phone     : customerPhone || '08000000000',
       },
-      item_details: itemDetails.length > 0 ? itemDetails : [{
-        id      : 'ORDER',
-        price   : grossAmount,
-        quantity: 1,
-        name    : 'Pembelian Buket',
-      }],
-      callbacks: {
-        finish: 'myapp://payment-finish',
-      },
+      item_details: itemDetails,
+      qris        : { acquirer: 'gopay' },
     };
 
-    console.log('📤 Midtrans parameter:', JSON.stringify(parameter, null, 2));
+    const transaction = await coreApi.charge(parameter);
 
-    const token = await snap.createTransactionToken(parameter);
+    console.log('✅ QRIS transaction:', transaction.order_id);
+    console.log('✅ QR String:', transaction.qr_string ? 'ada' : 'tidak ada');
 
-    console.log('✅ Token berhasil dibuat:', token);
-    res.json({ success: true, token });
-
-  } catch (e) {
-    console.error('❌ Midtrans error:', e.message);
-    console.error('❌ Full error:', e);
-    res.status(500).json({
-      success: false,
-      message: e.message,
-      detail : e.ApiResponse || null,
+    res.json({
+      success   : true,
+      qrString  : transaction.qr_string,
+      orderId   : transaction.order_id,
+      expireTime: transaction.expiry_time,
     });
-  }
-});
-
-// ── Cek status pembayaran ─────────────────────────────────────────────────
-app.get('/check-payment/:orderId', async (req, res) => {
-  try {
-    const coreApi = new midtrans.CoreApi({
-      isProduction: false,
-      serverKey   : process.env.MIDTRANS_SERVER_KEY,
-    });
-
-    const status = await coreApi.transaction.status(req.params.orderId);
-    console.log('💳 Payment status:', req.params.orderId, status.transaction_status);
-    res.json({ success: true, data: status });
   } catch (e) {
-    console.error('❌ Check payment error:', e.message);
+    console.error('❌ Error:', e.message);
     res.status(500).json({ success: false, message: e.message });
   }
 });
 
-// ── Midtrans webhook notification ─────────────────────────────────────────
-app.post('/notification', async (req, res) => {
+// ── Cek status transaksi ──────────────────────────────────────────────────
+app.get('/check-status/:orderId', async (req, res) => {
   try {
-    const notification = await snap.transaction.notification(req.body);
+    const status = await coreApi.transaction.status(req.params.orderId);
+    console.log(`📊 Status ${req.params.orderId}: ${status.transaction_status}`);
+    res.json({
+      success           : true,
+      transactionStatus : status.transaction_status,
+      fraudStatus       : status.fraud_status,
+      orderId           : status.order_id,
+    });
+  } catch (e) {
+    console.error('❌ Check status error:', e.message);
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// ── Webhook Midtrans ──────────────────────────────────────────────────────
+app.post('/webhook', async (req, res) => {
+  try {
+    const notification = await coreApi.transaction.notification(req.body);
     const { order_id, transaction_status, fraud_status } = notification;
 
-    console.log(`📦 Notification - Order ${order_id}: ${transaction_status} | Fraud: ${fraud_status}`);
+    console.log(`📦 Webhook - ${order_id}: ${transaction_status}`);
 
-    // Status mapping
-    let orderStatus = 'pending';
-    if (transaction_status === 'capture' || transaction_status === 'settlement') {
-      if (fraud_status === 'accept' || !fraud_status) {
-        orderStatus = 'paid';
-      }
-    } else if (transaction_status === 'cancel' || transaction_status === 'deny' ||
-               transaction_status === 'expire') {
-      orderStatus = 'cancelled';
-    } else if (transaction_status === 'pending') {
-      orderStatus = 'pending';
-    }
-
-    console.log(`✅ Order ${order_id} status: ${orderStatus}`);
-
-    // TODO: Update Firestore dari sini kalau mau
-    // Atau biarkan Flutter yang update via polling
-
-    res.json({ success: true, orderStatus });
+    res.json({ success: true, transaction_status });
   } catch (e) {
-    console.error('❌ Notification error:', e.message);
+    console.error('❌ Webhook error:', e.message);
     res.status(500).json({ success: false });
   }
 });
 
-
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📍 URL: http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
