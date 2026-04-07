@@ -21,7 +21,7 @@ const coreApi = new midtrans.CoreApi({
 
 app.get('/', (req, res) => res.json({ status: 'Buket Backend Running ✅' }));
 
-// ── Generate QRIS Dinamis ─────────────────────────────────────────────────
+// ── Generate QRIS ─────────────────────────────────────────────────
 app.post('/create-transaction', async (req, res) => {
   try {
     const { orderId, amount, customerName, customerEmail, customerPhone, items } = req.body;
@@ -32,7 +32,7 @@ app.post('/create-transaction', async (req, res) => {
 
     const grossAmount = parseInt(amount);
 
-    // ✅ FIX: Hitung total item dulu, lalu buat adjustment kalau tidak sama
+    //  Hitung total item, buat adjustment kalau tidak sama
     const itemDetails = (items || []).map(i => ({
       id      : String(i.productId   || 'ITEM').substring(0, 50),
       price   : parseInt(i.price)    || 0,
@@ -62,7 +62,7 @@ app.post('/create-transaction', async (req, res) => {
       },
       customer_details: {
         first_name: customerName  || 'Customer',
-        email     : customerEmail || 'customer@email.com',
+        email     : customerEmail || 'tes@gmail.com',
         phone     : customerPhone || '08000000000',
       },
       item_details: itemDetails,
@@ -71,8 +71,8 @@ app.post('/create-transaction', async (req, res) => {
 
     const transaction = await coreApi.charge(parameter);
 
-    console.log('✅ QRIS transaction:', transaction.order_id);
-    console.log('✅ QR String:', transaction.qr_string ? 'ada' : 'tidak ada');
+    console.log('QRIS transaction:', transaction.order_id);
+    console.log('QR String:', transaction.qr_string ? 'ada' : 'tidak ada');
 
     res.json({
       success   : true,
@@ -81,7 +81,7 @@ app.post('/create-transaction', async (req, res) => {
       expireTime: transaction.expiry_time,
     });
   } catch (e) {
-    console.error('❌ Error:', e.message);
+    console.error('Error:', e.message);
     res.status(500).json({ success: false, message: e.message });
   }
 });
@@ -90,7 +90,7 @@ app.post('/create-transaction', async (req, res) => {
 app.get('/check-status/:orderId', async (req, res) => {
   try {
     const status = await coreApi.transaction.status(req.params.orderId);
-    console.log(`📊 Status ${req.params.orderId}: ${status.transaction_status}`);
+    console.log(`Status ${req.params.orderId}: ${status.transaction_status}`);
     res.json({
       success           : true,
       transactionStatus : status.transaction_status,
@@ -98,7 +98,7 @@ app.get('/check-status/:orderId', async (req, res) => {
       orderId           : status.order_id,
     });
   } catch (e) {
-    console.error('❌ Check status error:', e.message);
+    console.error('Check status error:', e.message);
     res.status(500).json({ success: false, message: e.message });
   }
 });
@@ -109,14 +109,14 @@ app.post('/webhook', async (req, res) => {
     const notification = await coreApi.transaction.notification(req.body);
     const { order_id, transaction_status, fraud_status } = notification;
 
-    console.log(`📦 Webhook - ${order_id}: ${transaction_status}`);
+    console.log(`Webhook - ${order_id}: ${transaction_status}`);
 
     res.json({ success: true, transaction_status });
   } catch (e) {
-    console.error('❌ Webhook error:', e.message);
+    console.error('Webhook error:', e.message);
     res.status(500).json({ success: false });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
