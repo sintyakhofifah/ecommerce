@@ -1,12 +1,14 @@
-const express = require('express');
-const cors    = require('cors');
+const express  = require('express');
+const cors     = require('cors');
 const midtrans = require('midtrans-client');
+const axios    = require('axios');
 require('dotenv').config();
 
 const app = express();
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'] }));
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+// ── Midtrans clients ──────────────────────────────────────────────────────────
 const snap = new midtrans.Snap({
   isProduction: false,
   serverKey   : process.env.MIDTRANS_SERVER_KEY,
@@ -19,101 +21,160 @@ const coreApi = new midtrans.CoreApi({
   clientKey   : process.env.MIDTRANS_CLIENT_KEY,
 });
 
-app.get('/', (req, res) => res.json({ status: 'Buket Backend Running ✅' }));
+// ── Health check ──────────────────────────────────────────────────────────────
+app.get('/', (req, res) => {
+  res.json({
+    status   : 'Buket Backend Running ',
+    serverKey: process.env.MIDTRANS_SERVER_KEY ? 'ada' : 'TIDAK ADA',
+  });
+});
 
-// ── Generate QRIS ─────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// ENDPOINT UTAMA: Buat transaksi QRIS via Core API
+// Response: { success, token, qr_string, qr_url }
+// ─────────────────────────────────────────────────────────────────────────────
 app.post('/create-transaction', async (req, res) => {
+  console.log('Request body:', JSON.stringify(req.body, null, 2));
+
+  const { orderId, amount, customerName, customerEmail, customerPhone, items } = req.body;
+
+  if (!orderId || !amount) {
+    return res.status(400).json({ success: false, message: 'orderId dan amount wajib' });
+  }
+
+  const grossAmount = parseInt(amount);
+
+  // Buat item_details
+  const itemDetails = (items || []).map(i => ({
+    id      : String(i.productId   || 'ITEM'),
+    price   : parseInt(i.price)    || 0,
+    quantity: parseInt(i.quantity) || 1,
+    name    : String(i.productName || 'Produk').substring(0, 50),
+  }));
+
+  // Sesuaikan total item dengan gross_amount
+  const itemTotal = itemDetails.reduce((s, i) => s + i.price * i.quantity, 0);
+  if (itemTotal !== grossAmount) {
+    const diff = grossAmount - itemTotal;
+    itemDetails.push({
+      id      : 'ADJUSTMENT',
+      price   : diff,
+      quantity: 1,
+      name    : diff > 0 ? 'Ongkir & Biaya Lain' : 'Diskon',
+    });
+  }
+
+  // ── Coba Core API dulu (bisa dapat qr_string) ──────────────────────────────
   try {
-    const { orderId, amount, customerName, customerEmail, customerPhone, items } = req.body;
-
-    if (!orderId || !amount) {
-      return res.status(400).json({ success: false, message: 'orderId dan amount wajib' });
-    }
-
-    const grossAmount = parseInt(amount);
-
-    //  Hitung total item, buat adjustment kalau tidak sama
-    const itemDetails = (items || []).map(i => ({
-      id      : String(i.productId   || 'ITEM').substring(0, 50),
-      price   : parseInt(i.price)    || 0,
-      quantity: parseInt(i.quantity) || 1,
-      name    : String(i.productName || 'Produk').substring(0, 50),
-    }));
-
-    const itemTotal = itemDetails.reduce((s, i) => s + (i.price * i.quantity), 0);
-
-    // Adjustment untuk ongkir/diskon supaya total selalu match
-    if (itemTotal !== grossAmount) {
-      const diff = grossAmount - itemTotal;
-      itemDetails.push({
-        id      : 'ADJ',
-        price   : diff,
-        quantity: 1,
-        name    : diff > 0 ? 'Ongkos Kirim' : 'Diskon',
-      });
-    }
-
-    // Generate QRIS via Core API
-    const parameter = {
+    const coreParam = {
       payment_type      : 'qris',
-      transaction_details: {
-        order_id    : orderId,
-        gross_amount: grossAmount,
-      },
-      customer_details: {
+      transaction_details: { order_id: orderId, gross_amount: grossAmount },
+      customer_details  : {
         first_name: customerName  || 'Customer',
-        email     : customerEmail || 'tes@gmail.com',
+        email     : customerEmail || 'customer@email.com',
         phone     : customerPhone || '08000000000',
       },
       item_details: itemDetails,
       qris        : { acquirer: 'gopay' },
     };
 
-    const transaction = await coreApi.charge(parameter);
+    console.log('Core API param:', JSON.stringify(coreParam, null, 2));
+    const coreResponse = await coreApi.charge(coreParam);
+    console.log('Core API response:', JSON.stringify(coreResponse, null, 2));
 
-    console.log('QRIS transaction:', transaction.order_id);
-    console.log('QR String:', transaction.qr_string ? 'ada' : 'tidak ada');
+    // Core API response untuk QRIS:
+    // coreResponse.qr_string  → string EMVCo (ini yang dipakai simulator)
+    // coreResponse.actions[0].url → URL QR image PNG
 
-    res.json({
-      success   : true,
-      qrString  : transaction.qr_string,
-      orderId   : transaction.order_id,
-      expireTime: transaction.expiry_time,
+    const qrString = coreResponse.qr_string || null;
+    const qrUrl    = coreResponse.actions?.find(a => a.name === 'generate-qr-code')?.url
+                  || coreResponse.actions?.[0]?.url
+                  || null;
+
+    console.log('qr_string:', qrString ? qrString.substring(0, 30) + '...' : 'null');
+    console.log('qr_url   :', qrUrl);
+
+    // Juga generate Snap token (untuk fallback jika perlu)
+    let snapToken = null;
+    try {
+      const snapParam = {
+        transaction_details: { order_id: orderId + '-snap', gross_amount: grossAmount },
+        customer_details   : { first_name: customerName || 'Customer', email: customerEmail },
+        item_details       : itemDetails,
+        enabled_payments   : ['qris'],
+      };
+      const snapTx = await snap.createTransaction(snapParam);
+      snapToken    = snapTx.token;
+    } catch (snapErr) {
+      console.warn('Snap token gagal (tidak masalah):', snapErr.message);
+    }
+
+    return res.json({
+      success  : true,
+      token    : snapToken,       // untuk Midtrans SDK Flutter (startPaymentUiFlow)
+      qr_string: qrString,        // untuk ditampilkan sebagai QR di Flutter
+      qr_url   : qrUrl,           // URL gambar QR dari Midtrans
+      order_id : coreResponse.transaction_id || orderId,
     });
-  } catch (e) {
-    console.error('Error:', e.message);
-    res.status(500).json({ success: false, message: e.message });
+
+  } catch (coreErr) {
+    console.error(' Core API error:', coreErr.message, coreErr.ApiResponse);
+
+    // ── Fallback: pakai Snap saja ───────────────────────────────────────────
+    try {
+      console.log('Fallback ke Snap...');
+      const snapParam = {
+        transaction_details: { order_id: orderId, gross_amount: grossAmount },
+        customer_details   : {
+          first_name: customerName  || 'Customer',
+          email     : customerEmail || 'customer@email.com',
+          phone     : customerPhone || '08000000000',
+        },
+        item_details   : itemDetails,
+        enabled_payments: ['qris'],
+        qris           : { acquirer: 'gopay' },
+      };
+      const snapTx = await snap.createTransaction(snapParam);
+      console.log('Snap token:', snapTx.token);
+
+      return res.json({
+        success  : true,
+        token    : snapTx.token,
+        qr_string: null,
+        qr_url   : null,
+      });
+    } catch (snapErr) {
+      console.error(' Snap juga gagal:', snapErr.message);
+      return res.status(500).json({
+        success: false,
+        message: snapErr.message,
+        detail : snapErr.ApiResponse || coreErr.ApiResponse || null,
+      });
+    }
   }
 });
 
-// ── Cek status transaksi ──────────────────────────────────────────────────
-app.get('/check-status/:orderId', async (req, res) => {
+// ── Cek status pembayaran ─────────────────────────────────────────────────────
+app.get('/check-payment/:orderId', async (req, res) => {
   try {
     const status = await coreApi.transaction.status(req.params.orderId);
-    console.log(`Status ${req.params.orderId}: ${status.transaction_status}`);
-    res.json({
-      success           : true,
-      transactionStatus : status.transaction_status,
-      fraudStatus       : status.fraud_status,
-      orderId           : status.order_id,
-    });
+    console.log('Status:', req.params.orderId, '->', status.transaction_status);
+    res.json({ success: true, data: status });
   } catch (e) {
     console.error('Check status error:', e.message);
     res.status(500).json({ success: false, message: e.message });
   }
 });
 
-// ── Webhook Midtrans ──────────────────────────────────────────────────────
-app.post('/webhook', async (req, res) => {
+// ── Midtrans webhook notification ─────────────────────────────────────────────
+app.post('/notification', async (req, res) => {
   try {
-    const notification = await coreApi.transaction.notification(req.body);
+    const notification = await snap.transaction.notification(req.body);
     const { order_id, transaction_status, fraud_status } = notification;
-
-    console.log(`Webhook - ${order_id}: ${transaction_status}`);
-
-    res.json({ success: true, transaction_status });
+    console.log(` Notif - ${order_id}: ${transaction_status} | fraud: ${fraud_status}`);
+    res.json({ success: true });
   } catch (e) {
-    console.error('Webhook error:', e.message);
+    console.error('Notif error:', e.message);
     res.status(500).json({ success: false });
   }
 });
