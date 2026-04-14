@@ -162,6 +162,33 @@ app.post('/create-transaction', async (req, res) => {
   }
 });
 
+// ── Simulate payment (sandbox only) ──────────────────────────────────────────
+app.post('/simulate-payment/:orderId', async (req, res) => {
+  try {
+    // Panggil Midtrans simulator
+    const response = await coreApi.transaction.status(req.params.orderId);
+    console.log('Simulate status:', response.transaction_status);
+
+    // Force settlement via Midtrans sandbox
+    const axios = require('axios');
+    await axios.post(
+      `https://api.sandbox.midtrans.com/v2/${req.params.orderId}/accept`,
+      {},
+      {
+        headers: {
+          'Authorization': 'Basic ' + Buffer.from(process.env.MIDTRANS_SERVER_KEY + ':').toString('base64'),
+          'Content-Type': 'application/json',
+        }
+      }
+    );
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Simulate error:', e.message);
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
 // ── Cek status pembayaran ─────────────────────────────────────────────────────
 app.get('/check-payment/:orderId', async (req, res) => {
   try {
