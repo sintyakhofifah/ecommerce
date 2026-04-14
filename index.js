@@ -1,12 +1,19 @@
 const express  = require('express');
 const cors     = require('cors');
 const midtrans = require('midtrans-client');
-const axios    = require('axios');
+const admin    = require('firebase-admin'); // ← tambah ini
 require('dotenv').config();
 
 const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
+
+// ── Firebase Admin ────────────────────────────────────────────────────────────
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+const db = admin.firestore();
 
 // ── Midtrans clients ──────────────────────────────────────────────────────────
 const snap = new midtrans.Snap({
@@ -20,6 +27,7 @@ const coreApi = new midtrans.CoreApi({
   serverKey   : process.env.MIDTRANS_SERVER_KEY,
   clientKey   : process.env.MIDTRANS_CLIENT_KEY,
 });
+
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
@@ -171,7 +179,26 @@ app.post('/notification', async (req, res) => {
   try {
     const notification = await snap.transaction.notification(req.body);
     const { order_id, transaction_status, fraud_status } = notification;
-    console.log(` Notif - ${order_id}: ${transaction_status} | fraud: ${fraud_status}`);
+    console.log(`Notif - ${order_id}: ${transaction_status} | fraud: ${fraud_status}`);
+
+    // Tentukan status pembayaran
+    let paymentStatus = 'pending';
+    if (
+      transaction_status === 'settlement' ||
+      (transaction_status === 'capture' && fraud_status === 'accept')
+    ) {
+      paymentStatus = 'paid';
+    } else if (['cancel', 'deny', 'expire'].includes(transaction_status)) {
+      paymentStatus = 'failed';
+    }
+
+    // ← Update Firestore
+    await db.collection('orders').doc(order_id).update({
+      paymentStatus,
+      paidAt: paymentStatus === 'paid' ? admin.firestore.FieldValue.serverTimestamp() : null,
+    });
+
+    console.log(`✅ Order ${order_id} updated → ${paymentStatus}`);
     res.json({ success: true });
   } catch (e) {
     console.error('Notif error:', e.message);
