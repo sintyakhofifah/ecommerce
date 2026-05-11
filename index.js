@@ -162,6 +162,106 @@ app.post('/create-transaction', async (req, res) => {
   }
 });
 
+// ── Buat Virtual Account (Bank Transfer) ──────────────────────────────────────
+app.post('/create-va', async (req, res) => {
+  console.log('VA Request:', JSON.stringify(req.body, null, 2));
+
+  const { orderId, amount, customerName, customerEmail, customerPhone, items, bank } = req.body;
+
+  if (!orderId || !amount || !bank) {
+    return res.status(400).json({ success: false, message: 'orderId, amount, dan bank wajib' });
+  }
+
+  const grossAmount = parseInt(amount);
+
+  const itemDetails = (items || []).map(i => ({
+    id      : String(i.productId   || 'ITEM'),
+    price   : parseInt(i.price)    || 0,
+    quantity: parseInt(i.quantity) || 1,
+    name    : String(i.productName || 'Produk').substring(0, 50),
+  }));
+
+  const itemTotal = itemDetails.reduce((s, i) => s + i.price * i.quantity, 0);
+  if (itemTotal !== grossAmount) {
+    const diff = grossAmount - itemTotal;
+    itemDetails.push({
+      id      : 'ADJUSTMENT',
+      price   : diff,
+      quantity: 1,
+      name    : diff > 0 ? 'Ongkir & Biaya Lain' : 'Diskon',
+    });
+  }
+
+  try {
+    // Mandiri pakai echannel, lainnya pakai bank_transfer
+    let chargeParam;
+
+    if (bank === 'mandiri') {
+      chargeParam = {
+        payment_type       : 'echannel',
+        transaction_details: { order_id: orderId, gross_amount: grossAmount },
+        customer_details   : {
+          first_name: customerName  || 'Customer',
+          email     : customerEmail || 'customer@email.com',
+          phone     : customerPhone || '08000000000',
+        },
+        item_details: itemDetails,
+        echannel    : {
+          bill_info1: 'Pembayaran',
+          bill_info2: 'Buket Order',
+        },
+      };
+    } else {
+      chargeParam = {
+        payment_type       : 'bank_transfer',
+        transaction_details: { order_id: orderId, gross_amount: grossAmount },
+        customer_details   : {
+          first_name: customerName  || 'Customer',
+          email     : customerEmail || 'customer@email.com',
+          phone     : customerPhone || '08000000000',
+        },
+        item_details : itemDetails,
+        bank_transfer: { bank: bank }, // 'bca' | 'bni' | 'bri' | 'permata' | 'bsi'
+      };
+    }
+
+    console.log('VA charge param:', JSON.stringify(chargeParam, null, 2));
+    const response = await coreApi.charge(chargeParam);
+    console.log('VA response:', JSON.stringify(response, null, 2));
+
+    // Ambil nomor VA dari response
+    let vaNumber = null;
+
+    if (bank === 'mandiri') {
+      // Mandiri pakai bill_key + biller_code
+      vaNumber = response.biller_code + response.bill_key;
+    } else if (bank === 'bca') {
+      vaNumber = response.va_numbers?.[0]?.va_number || null;
+    } else {
+      vaNumber = response.va_numbers?.[0]?.va_number
+              || response.permata_va_number
+              || null;
+    }
+
+    console.log('VA Number:', vaNumber);
+
+    return res.json({
+      success  : true,
+      va_number: vaNumber,
+      bank     : bank,
+      order_id : orderId,
+    });
+
+  } catch (err) {
+    console.error('VA error:', err.message, err.ApiResponse);
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+      detail : err.ApiResponse || null,
+    });
+  }
+});
+
 // ── Simulate payment (sandbox only) ──────────────────────────────────────────
 app.post('/simulate-payment/:orderId', async (req, res) => {
   try {
