@@ -210,7 +210,7 @@ app.post('/create-va', async (req, res) => {
       vaNumber = response.va_numbers?.[0]?.va_number || null;
     } else {
       vaNumber = response.va_numbers?.[0]?.va_number
-              || response.permata_va_number
+              || response.bsi_va_number
               || null;
     }
 
